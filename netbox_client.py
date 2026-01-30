@@ -161,8 +161,23 @@ class NetBoxRestClient(NetBoxClientBase):
         self.token = token
         self.verify_ssl = verify_ssl
         self.session = requests.Session()
+
+        # NetBox v4 supports both legacy "Token <token>" (v1) and v2 bearer tokens.
+        # For v2 tokens, the full Authorization header value looks like:
+        #   "Bearer nbx_<key>.<secret>"
+        # Keep compatibility by accepting either a raw token (we'll prefix with "Token ")
+        # or a full header value (already prefixed with "Token " or "Bearer ").
+        auth_value = token.strip()
+        if not (auth_value.startswith('Token ') or auth_value.startswith('Bearer ')):
+            # Heuristic: NetBox v2 API tokens start with "nbx_" and must use Bearer auth.
+            # https://netboxlabs.com/docs/netbox/en/stable/administration/authentication/#api-tokens
+            if auth_value.startswith('nbx_'):
+                auth_value = f'Bearer {auth_value}'
+            else:
+                auth_value = f'Token {auth_value}'
+
         self.session.headers.update({
-            'Authorization': f'Token {token}',
+            'Authorization': auth_value,
             'Content-Type': 'application/json',
             'Accept': 'application/json',
         })
