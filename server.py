@@ -108,7 +108,10 @@ NETBOX_OBJECT_TYPES_NETBOX4 = {
     # NetBox 4.x introduced Modules (dcim/modules + related models).
     "modules": "dcim/modules",
     "module-bays": "dcim/module-bays",
-    "module-profiles": "dcim/module-profiles",
+    # NetBox 4.x uses "module type profiles" (dcim/module-type-profiles). Some clients
+    # may refer to these as "module-profiles"; keep an alias for convenience.
+    "module-type-profiles": "dcim/module-type-profiles",
+    "module-profiles": "dcim/module-type-profiles",
     "module-types": "dcim/module-types",
 }
 
@@ -205,7 +208,8 @@ def _detect_netbox_major_version(netbox_url: str, verify_ssl: bool, token: str |
         r.raise_for_status()
         j = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
         ver = j.get("netbox-version") or j.get("netbox_version") or ""
-        m = re.match(r"^(\\d+)", str(ver).strip())
+        # Match leading major version (e.g. "4" from "4.5.1").
+        m = re.match(r"^(\d+)", str(ver).strip())
         if m:
             return int(m.group(1))
     except Exception:
