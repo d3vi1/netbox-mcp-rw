@@ -4,6 +4,8 @@ import os
 import re
 from urllib.parse import urljoin
 import requests
+import socket
+from urllib.parse import urlparse, urlunparse
 
 # Mapping of simple object names to API endpoints
 NETBOX_OBJECT_TYPES_BASE = {
@@ -199,6 +201,47 @@ def _detect_netbox_major_version(netbox_url: str, verify_ssl: bool):
     except Exception:
         return None
     return None
+
+def _auto_detect_scheme(netbox_url: str) -> str:
+    """
+    Optionally adjust NETBOX_URL scheme based on reachability.
+
+    Safe-by-default:
+    - Disabled unless NETBOX_MCP_AUTO_SCHEME is enabled.
+    - Only switches scheme if the current scheme is not reachable and the
+      alternative one is.
+    """
+    mode = os.getenv("NETBOX_MCP_AUTO_SCHEME", "false").strip().lower()
+    if mode not in ("1", "true", "yes", "on", "auto"):
+        return netbox_url
+
+    u = urlparse(netbox_url.strip())
+    if u.scheme not in ("http", "https") or not u.hostname:
+        return netbox_url
+
+    timeout = float(os.getenv("NETBOX_MCP_AUTO_SCHEME_TIMEOUT_SEC", "1.5"))
+    host = u.hostname
+
+    def _can_connect(port: int) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
+    http_ok = _can_connect(80)
+    https_ok = _can_connect(443)
+
+    scheme = u.scheme
+    if scheme == "https" and (not https_ok) and http_ok:
+        scheme = "http"
+    elif scheme == "http" and (not http_ok) and https_ok:
+        scheme = "https"
+
+    if scheme == u.scheme:
+        return netbox_url
+
+    return urlunparse((scheme, u.netloc, u.path or "/", "", u.query, u.fragment))
 
 
 @mcp.tool()
@@ -647,6 +690,8 @@ if __name__ == "__main__":
     
     if not netbox_url or not netbox_token:
         raise ValueError("NETBOX_URL and NETBOX_TOKEN environment variables must be set")
+
+    netbox_url = _auto_detect_scheme(netbox_url)
     
     # Initialize NetBox client
     netbox = NetBoxRestClient(url=netbox_url, token=netbox_token, verify_ssl=verify_ssl)
