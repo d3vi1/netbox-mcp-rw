@@ -15,6 +15,7 @@ NETBOX_OBJECT_TYPES = {
     "front-ports": "dcim/front-ports",
     "interfaces": "dcim/interfaces",
     "inventory-items": "dcim/inventory-items",
+    # NetBox 4.x stores MACs as separate objects; interfaces reference them.
     "mac-addresses": "dcim/mac-addresses",
     "locations": "dcim/locations",
     "manufacturers": "dcim/manufacturers",
