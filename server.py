@@ -17,6 +17,15 @@ NETBOX_OBJECT_TYPES_BASE = {
     "device-bays": "dcim/device-bays",
     "device-roles": "dcim/device-roles",
     "device-types": "dcim/device-types",
+    # Device type component templates
+    "interface-templates": "dcim/interface-templates",
+    "power-port-templates": "dcim/power-port-templates",
+    "power-outlet-templates": "dcim/power-outlet-templates",
+    "console-port-templates": "dcim/console-port-templates",
+    "console-server-port-templates": "dcim/console-server-port-templates",
+    "front-port-templates": "dcim/front-port-templates",
+    "rear-port-templates": "dcim/rear-port-templates",
+    "device-bay-templates": "dcim/device-bay-templates",
     "front-ports": "dcim/front-ports",
     "interfaces": "dcim/interfaces",
     "inventory-items": "dcim/inventory-items",
@@ -108,6 +117,7 @@ NETBOX_OBJECT_TYPES_NETBOX4 = {
     # NetBox 4.x introduced Modules (dcim/modules + related models).
     "modules": "dcim/modules",
     "module-bays": "dcim/module-bays",
+    "module-bay-templates": "dcim/module-bay-templates",
     # NetBox 4.x uses "module type profiles" (dcim/module-type-profiles). Some clients
     # may refer to these as "module-profiles"; keep an alias for convenience.
     "module-type-profiles": "dcim/module-type-profiles",
