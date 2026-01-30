@@ -15,6 +15,7 @@ NETBOX_OBJECT_TYPES = {
     "front-ports": "dcim/front-ports",
     "interfaces": "dcim/interfaces",
     "inventory-items": "dcim/inventory-items",
+    "mac-addresses": "dcim/mac-addresses",
     "locations": "dcim/locations",
     "manufacturers": "dcim/manufacturers",
     "modules": "dcim/modules",
@@ -28,6 +29,7 @@ NETBOX_OBJECT_TYPES = {
     "racks": "dcim/racks",
     "rack-reservations": "dcim/rack-reservations",
     "rack-roles": "dcim/rack-roles",
+    "rack-types": "dcim/rack-types",
     "regions": "dcim/regions",
     "sites": "dcim/sites",
     "site-groups": "dcim/site-groups",
@@ -99,6 +101,15 @@ NETBOX_OBJECT_TYPES = {
 
 mcp = FastMCP("NetBox", log_level="DEBUG")
 netbox = None
+
+def _wrap_list_result(data):
+    """
+    Some Codex MCP clients fail when a tool returns a bare list (e.g. [] or many
+    objects). Always return a JSON object for list results.
+    """
+    if isinstance(data, list):
+        return {"count": len(data), "results": data}
+    return data
 
 @mcp.tool()
 def netbox_get_objects(object_type: str, filters: dict):
@@ -202,7 +213,7 @@ def netbox_get_objects(object_type: str, filters: dict):
     endpoint = NETBOX_OBJECT_TYPES[object_type]
         
     # Make API call
-    return netbox.get(endpoint, params=filters)
+    return _wrap_list_result(netbox.get(endpoint, params=filters))
 
 @mcp.tool()
 def netbox_get_object_by_id(object_type: str, object_id: int):
@@ -273,7 +284,7 @@ def netbox_get_changelogs(filters: dict):
     endpoint = "core/object-changes"
     
     # Make API call
-    return netbox.get(endpoint, params=filters)
+    return _wrap_list_result(netbox.get(endpoint, params=filters))
 
 @mcp.tool()
 def netbox_create_object(object_type: str, data: dict):
