@@ -126,7 +126,7 @@ def _maybe_wrap_results(value):
     Safe-by-default: wrap list results unless explicitly disabled.
     """
     if _truthy_env("NETBOX_MCP_WRAP_LIST_RESULTS", "true") and isinstance(value, list):
-        return {"results": value}
+        return {"count": len(value), "results": value}
     return value
 
 
