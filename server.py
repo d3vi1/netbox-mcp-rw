@@ -187,11 +187,21 @@ def _detect_capabilities() -> None:
     if isinstance(primary_mac_field, dict) and primary_mac_field.get("read_only") is False:
         CAPABILITIES["interfaces_primary_mac_address_writable"] = True
 
-def _detect_netbox_major_version(netbox_url: str, verify_ssl: bool):
-    # /api/status/ is public on NetBox and includes netbox-version.
+def _detect_netbox_major_version(netbox_url: str, verify_ssl: bool, token: str | None = None):
+    # /api/status/ may require auth depending on NetBox config; include token if provided.
     try:
         status_url = urljoin(netbox_url.rstrip("/") + "/", "api/status/")
-        r = requests.get(status_url, timeout=5, verify=verify_ssl)
+        headers = {}
+        if token:
+            tok = token.strip()
+            if tok.startswith(("Token ", "Bearer ")):
+                headers["Authorization"] = tok
+            elif tok.startswith("nbx_"):
+                headers["Authorization"] = f"Bearer {tok}"
+            else:
+                headers["Authorization"] = f"Token {tok}"
+
+        r = requests.get(status_url, timeout=5, verify=verify_ssl, headers=headers)
         r.raise_for_status()
         j = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
         ver = j.get("netbox-version") or j.get("netbox_version") or ""
@@ -699,8 +709,11 @@ if __name__ == "__main__":
     # Version-gate NetBox 4-only endpoints so we don't advertise unsupported object
     # types to older NetBox instances. Override via env if needed.
     gate_mode = os.getenv("NETBOX_MCP_ENABLE_NETBOX4_OBJECTS", "auto").strip().lower()
-    major = _detect_netbox_major_version(netbox_url, verify_ssl=verify_ssl) if gate_mode == "auto" else None
+    major = _detect_netbox_major_version(netbox_url, verify_ssl=verify_ssl, token=netbox_token) if gate_mode == "auto" else None
     enable_netbox4 = (gate_mode == "true") or (gate_mode == "1") or (gate_mode == "yes") or (gate_mode == "on") or (major is not None and major >= 4)
+    if (not enable_netbox4) and gate_mode == "auto":
+        # Safe fallback: if /api/status can't be read, probe an actual 4.x-only endpoint.
+        enable_netbox4 = _options("dcim/modules") is not None
     if enable_netbox4:
         NETBOX_OBJECT_TYPES.update(NETBOX_OBJECT_TYPES_NETBOX4)
     _detect_capabilities()
