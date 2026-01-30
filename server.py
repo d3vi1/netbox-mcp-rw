@@ -1,9 +1,12 @@
 from mcp.server.fastmcp import FastMCP
 from netbox_client import NetBoxRestClient
 import os
+import re
+from urllib.parse import urljoin
+import requests
 
 # Mapping of simple object names to API endpoints
-NETBOX_OBJECT_TYPES = {
+NETBOX_OBJECT_TYPES_BASE = {
     # DCIM (Device and Infrastructure)
     "cables": "dcim/cables",
     "console-ports": "dcim/console-ports", 
@@ -15,13 +18,8 @@ NETBOX_OBJECT_TYPES = {
     "front-ports": "dcim/front-ports",
     "interfaces": "dcim/interfaces",
     "inventory-items": "dcim/inventory-items",
-    # NetBox 4.x stores MACs as separate objects; interfaces reference them.
-    "mac-addresses": "dcim/mac-addresses",
     "locations": "dcim/locations",
     "manufacturers": "dcim/manufacturers",
-    "modules": "dcim/modules",
-    "module-bays": "dcim/module-bays",
-    "module-types": "dcim/module-types",
     "platforms": "dcim/platforms",
     "power-feeds": "dcim/power-feeds",
     "power-outlets": "dcim/power-outlets",
@@ -30,7 +28,6 @@ NETBOX_OBJECT_TYPES = {
     "racks": "dcim/racks",
     "rack-reservations": "dcim/rack-reservations",
     "rack-roles": "dcim/rack-roles",
-    "rack-types": "dcim/rack-types",
     "regions": "dcim/regions",
     "sites": "dcim/sites",
     "site-groups": "dcim/site-groups",
@@ -100,17 +97,47 @@ NETBOX_OBJECT_TYPES = {
     "webhooks": "extras/webhooks",
 }
 
+NETBOX_OBJECT_TYPES_NETBOX4 = {
+    # NetBox 4.x introduced Modules (dcim/modules + related models).
+    "modules": "dcim/modules",
+    "module-bays": "dcim/module-bays",
+    "module-profiles": "dcim/module-profiles",
+    "module-types": "dcim/module-types",
+}
+
+NETBOX_OBJECT_TYPES = dict(NETBOX_OBJECT_TYPES_BASE)
+
 mcp = FastMCP("NetBox", log_level="DEBUG")
 netbox = None
 
-def _wrap_list_result(data):
+def _truthy_env(name: str, default: str = "false") -> bool:
+    raw = os.getenv(name, default)
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+def _maybe_wrap_results(value):
     """
-    Some Codex MCP clients fail when a tool returns a bare list (e.g. [] or many
-    objects). Always return a JSON object for list results.
+    Some MCP clients/framework helpers treat a returned Python list as a list of
+    "content blocks" rather than a JSON value, which can truncate/alter the payload.
+    To keep broad compatibility, wrapping is opt-in via env.
     """
-    if isinstance(data, list):
-        return {"count": len(data), "results": data}
-    return data
+    if _truthy_env("NETBOX_MCP_WRAP_LIST_RESULTS", "false") and isinstance(value, list):
+        return {"results": value}
+    return value
+
+def _detect_netbox_major_version(netbox_url: str, verify_ssl: bool):
+    # /api/status/ is public on NetBox and includes netbox-version.
+    try:
+        status_url = urljoin(netbox_url.rstrip("/") + "/", "api/status/")
+        r = requests.get(status_url, timeout=5, verify=verify_ssl)
+        r.raise_for_status()
+        j = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        ver = j.get("netbox-version") or j.get("netbox_version") or ""
+        m = re.match(r"^(\\d+)", str(ver).strip())
+        if m:
+            return int(m.group(1))
+    except Exception:
+        return None
+    return None
 
 @mcp.tool()
 def netbox_get_objects(object_type: str, filters: dict):
@@ -135,9 +162,6 @@ def netbox_get_objects(object_type: str, filters: dict):
     - inventory-items
     - locations
     - manufacturers
-    - modules
-    - module-bays
-    - module-types
     - platforms
     - power-feeds
     - power-outlets
@@ -202,6 +226,12 @@ def netbox_get_objects(object_type: str, filters: dict):
     - wireless-lans
     - wireless-lan-groups
     - wireless-links
+
+    NetBox 4.x only:
+    - modules
+    - module-bays
+    - module-profiles
+    - module-types
     
     See NetBox API documentation for filtering options for each object type.
     """
@@ -214,7 +244,8 @@ def netbox_get_objects(object_type: str, filters: dict):
     endpoint = NETBOX_OBJECT_TYPES[object_type]
         
     # Make API call
-    return _wrap_list_result(netbox.get(endpoint, params=filters))
+    results = netbox.get(endpoint, params=filters)
+    return _maybe_wrap_results(results)
 
 @mcp.tool()
 def netbox_get_object_by_id(object_type: str, object_id: int):
@@ -285,7 +316,8 @@ def netbox_get_changelogs(filters: dict):
     endpoint = "core/object-changes"
     
     # Make API call
-    return _wrap_list_result(netbox.get(endpoint, params=filters))
+    results = netbox.get(endpoint, params=filters)
+    return _maybe_wrap_results(results)
 
 @mcp.tool()
 def netbox_create_object(object_type: str, data: dict):
@@ -423,7 +455,8 @@ def netbox_bulk_create_objects(object_type: str, data: list):
     endpoint = NETBOX_OBJECT_TYPES[object_type]
         
     # Make API call
-    return netbox.bulk_create(endpoint, data)
+    results = netbox.bulk_create(endpoint, data)
+    return _maybe_wrap_results(results)
 
 @mcp.tool()
 def netbox_bulk_update_objects(object_type: str, data: list):
@@ -453,7 +486,8 @@ def netbox_bulk_update_objects(object_type: str, data: list):
     endpoint = NETBOX_OBJECT_TYPES[object_type]
         
     # Make API call
-    return netbox.bulk_update(endpoint, data)
+    results = netbox.bulk_update(endpoint, data)
+    return _maybe_wrap_results(results)
 
 @mcp.tool()
 def netbox_bulk_delete_objects(object_type: str, object_ids: list):
@@ -493,11 +527,21 @@ if __name__ == "__main__":
     # Load NetBox configuration from environment variables
     netbox_url = os.getenv("NETBOX_URL")
     netbox_token = os.getenv("NETBOX_TOKEN")
+    verify_ssl_raw = os.getenv("NETBOX_VERIFY_SSL", "true")
+    verify_ssl = str(verify_ssl_raw).strip().lower() not in ("0", "false", "no", "off")
     
     if not netbox_url or not netbox_token:
         raise ValueError("NETBOX_URL and NETBOX_TOKEN environment variables must be set")
     
     # Initialize NetBox client
-    netbox = NetBoxRestClient(url=netbox_url, token=netbox_token)
+    netbox = NetBoxRestClient(url=netbox_url, token=netbox_token, verify_ssl=verify_ssl)
+
+    # Version-gate NetBox 4-only endpoints so we don't advertise unsupported object
+    # types to older NetBox instances. Override via env if needed.
+    gate_mode = os.getenv("NETBOX_MCP_ENABLE_NETBOX4_OBJECTS", "auto").strip().lower()
+    major = _detect_netbox_major_version(netbox_url, verify_ssl=verify_ssl) if gate_mode == "auto" else None
+    enable_netbox4 = (gate_mode == "true") or (gate_mode == "1") or (gate_mode == "yes") or (gate_mode == "on") or (major is not None and major >= 4)
+    if enable_netbox4:
+        NETBOX_OBJECT_TYPES.update(NETBOX_OBJECT_TYPES_NETBOX4)
     
     mcp.run(transport="stdio")
