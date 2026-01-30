@@ -28,10 +28,15 @@ NETBOX_OBJECT_TYPES_BASE = {
     "racks": "dcim/racks",
     "rack-reservations": "dcim/rack-reservations",
     "rack-roles": "dcim/rack-roles",
+    "rack-types": "dcim/rack-types",
     "regions": "dcim/regions",
     "sites": "dcim/sites",
     "site-groups": "dcim/site-groups",
     "virtual-chassis": "dcim/virtual-chassis",
+
+    # NetBox 4.x introduces dcim/mac-addresses. We include it here and
+    # capability-detect at runtime to keep safe-by-default behavior.
+    "mac-addresses": "dcim/mac-addresses",
     
     # IPAM (IP Address Management)
     "asns": "ipam/asns",
@@ -118,11 +123,67 @@ def _maybe_wrap_results(value):
     """
     Some MCP clients/framework helpers treat a returned Python list as a list of
     "content blocks" rather than a JSON value, which can truncate/alter the payload.
-    To keep broad compatibility, wrapping is opt-in via env.
+    Safe-by-default: wrap list results unless explicitly disabled.
     """
-    if _truthy_env("NETBOX_MCP_WRAP_LIST_RESULTS", "false") and isinstance(value, list):
+    if _truthy_env("NETBOX_MCP_WRAP_LIST_RESULTS", "true") and isinstance(value, list):
         return {"results": value}
     return value
+
+
+CAPABILITIES = {
+    # NetBox 4.x has dcim/mac-addresses; older versions may not.
+    "has_mac_addresses_endpoint": False,
+    # Older versions often accept setting interfaces.mac_address; NetBox 4.x makes it read-only.
+    "interfaces_mac_address_writable": False,
+    # NetBox 4.x uses interfaces.primary_mac_address referencing dcim/mac-addresses.
+    "interfaces_primary_mac_address_writable": False,
+}
+
+
+def _options(endpoint: str):
+    """
+    Return OPTIONS payload for an endpoint, or None if the endpoint does not exist.
+    Safe-by-default: callers must handle None by disabling features.
+    """
+    try:
+        url = f"{netbox.api_url}/{endpoint.strip('/')}/"
+        r = netbox.session.options(url, verify=netbox.verify_ssl)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def _detect_capabilities() -> None:
+    """
+    Detect which NetBox API features are supported by the connected instance.
+    This avoids breaking older NetBox versions (safe-by-default).
+    """
+    # Detect dcim/mac-addresses endpoint
+    if _options("dcim/mac-addresses") is not None:
+        CAPABILITIES["has_mac_addresses_endpoint"] = True
+    else:
+        # Hide unsupported endpoint from the object type mapping (avoid 404 surprises).
+        NETBOX_OBJECT_TYPES.pop("mac-addresses", None)
+
+    # Detect whether interfaces.mac_address is writable (older NetBox) vs read-only (NetBox 4.x).
+    iface_opts = _options("dcim/interfaces")
+    if not iface_opts:
+        return
+
+    actions = iface_opts.get("actions", {}) or {}
+    # Prefer PATCH schema if present; fall back to POST schema.
+    schema = actions.get("PATCH") or actions.get("POST") or {}
+
+    mac_field = schema.get("mac_address") or {}
+    if isinstance(mac_field, dict) and mac_field.get("read_only") is False:
+        CAPABILITIES["interfaces_mac_address_writable"] = True
+
+    primary_mac_field = schema.get("primary_mac_address") or {}
+    if isinstance(primary_mac_field, dict) and primary_mac_field.get("read_only") is False:
+        CAPABILITIES["interfaces_primary_mac_address_writable"] = True
 
 def _detect_netbox_major_version(netbox_url: str, verify_ssl: bool):
     # /api/status/ is public on NetBox and includes netbox-version.
@@ -138,6 +199,60 @@ def _detect_netbox_major_version(netbox_url: str, verify_ssl: bool):
     except Exception:
         return None
     return None
+
+
+@mcp.tool()
+def netbox_set_interface_mac(interface_id: int, mac_address: str):
+    """
+    Set the MAC address for an interface in a NetBox-version-aware way (safe-by-default).
+
+    Behavior:
+    - If interfaces.mac_address is writable, set it directly (older NetBox).
+    - Else, if dcim/mac-addresses exists and interfaces.primary_mac_address is writable, create/assign a MAC object
+      and set primary_mac_address (NetBox 4.x).
+    """
+    if not netbox:
+        raise RuntimeError("NetBox client not initialized")
+
+    if CAPABILITIES["interfaces_mac_address_writable"]:
+        return netbox.update("dcim/interfaces", interface_id, {"mac_address": mac_address})
+
+    if not CAPABILITIES["has_mac_addresses_endpoint"]:
+        raise ValueError(
+            "This NetBox instance does not support dcim/mac-addresses, and interfaces.mac_address is not writable. "
+            "Cannot set MAC safely."
+        )
+
+    if not CAPABILITIES["interfaces_primary_mac_address_writable"]:
+        raise ValueError(
+            "This NetBox instance supports dcim/mac-addresses but interfaces.primary_mac_address is not writable. "
+            "Cannot set MAC safely."
+        )
+
+    # Create or reuse the MAC address object, and assign it to the interface.
+    existing = netbox.get("dcim/mac-addresses", params={"mac_address": mac_address})
+    mac_obj = None
+    if isinstance(existing, list) and existing:
+        mac_obj = existing[0]
+        # Ensure it's assigned to this interface.
+        if (mac_obj.get("assigned_object_type") != "dcim.interface") or (mac_obj.get("assigned_object_id") != interface_id):
+            mac_obj = netbox.update(
+                "dcim/mac-addresses",
+                mac_obj["id"],
+                {"assigned_object_type": "dcim.interface", "assigned_object_id": interface_id},
+            )
+    else:
+        mac_obj = netbox.create(
+            "dcim/mac-addresses",
+            {"mac_address": mac_address, "assigned_object_type": "dcim.interface", "assigned_object_id": interface_id},
+        )
+
+    # Prefer passing the ID (common NetBox behavior); fall back to nested object if needed.
+    try:
+        return netbox.update("dcim/interfaces", interface_id, {"primary_mac_address": mac_obj["id"]})
+    except Exception:
+        return netbox.update("dcim/interfaces", interface_id, {"primary_mac_address": {"id": mac_obj["id"]}})
+
 
 @mcp.tool()
 def netbox_get_objects(object_type: str, filters: dict):
@@ -543,5 +658,6 @@ if __name__ == "__main__":
     enable_netbox4 = (gate_mode == "true") or (gate_mode == "1") or (gate_mode == "yes") or (gate_mode == "on") or (major is not None and major >= 4)
     if enable_netbox4:
         NETBOX_OBJECT_TYPES.update(NETBOX_OBJECT_TYPES_NETBOX4)
+    _detect_capabilities()
     
     mcp.run(transport="stdio")
